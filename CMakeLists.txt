@@ -72,6 +72,18 @@ set(CMAKE_C_VISIBILITY_PRESET hidden)
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN YES)
 
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64)
+    # Setup options for x86_64 micro-architecture levels.
+    # https://clang.llvm.org/docs/UsersManual.html#x86
+    set(EVMONE_X86_64_ARCH_LEVEL 2 CACHE STRING "The x86_64 micro-architecture level")
+    if(EVMONE_X86_64_ARCH_LEVEL GREATER_EQUAL 2 AND EVMONE_X86_64_ARCH_LEVEL LESS_EQUAL 4)
+        add_compile_options(-march=x86-64-v${EVMONE_X86_64_ARCH_LEVEL})
+        message(STATUS "x86_64 micro-architecture level: ${EVMONE_X86_64_ARCH_LEVEL}")
+    else()
+        message(FATAL_ERROR "Invalid EVMONE_X86_64_ARCH_LEVEL: ${EVMONE_X86_64_ARCH_LEVEL}")
+    endif()
+endif()
+
 include(GNUInstallDirs)
 
 if(EVMONE_FUZZING)
