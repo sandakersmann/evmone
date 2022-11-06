@@ -205,16 +205,17 @@ struct Position
 /// A helper to invoke the instruction implementation of the given opcode Op.
 template <evmc_opcode Op>
 [[release_inline]] inline Position invoke(const CostTable& cost_table, const uint256* stack_bottom,
-    Position pos, ExecutionState& state) noexcept
+    Position pos, ExecutionState& state, int64_t& g) noexcept
 {
-    if (const auto status =
-            check_requirements<Op>(cost_table, state.gas_left, pos.stack_top, stack_bottom);
+    if (const auto status = check_requirements<Op>(cost_table, g, pos.stack_top, stack_bottom);
         status != EVMC_SUCCESS)
     {
         state.status = status;
         return {nullptr, pos.stack_top};
     }
+    state.gas_left = g;
     const auto new_pos = invoke(instr::core::impl<Op>, pos, state);
+    g = state.gas_left;
     const auto new_stack_top = pos.stack_top + instr::traits[Op].stack_height_change;
     return {new_pos, new_stack_top};
 }
@@ -229,6 +230,8 @@ void dispatch(const CostTable& cost_table, ExecutionState& state, const uint8_t*
     // Code iterator and stack top pointer for interpreter loop.
     Position position{code, stack_bottom};
 
+    auto g = state.gas_left;
+
     while (true)  // Guaranteed to terminate because padded code ends with STOP.
     {
         if constexpr (TracingEnabled)
@@ -242,20 +245,20 @@ void dispatch(const CostTable& cost_table, ExecutionState& state, const uint8_t*
         const auto op = *position.code_it;
         switch (op)
         {
-#define ON_OPCODE(OPCODE)                                                                \
-    case OPCODE:                                                                         \
-        ASM_COMMENT(OPCODE);                                                             \
-        if (const auto next = invoke<OPCODE>(cost_table, stack_bottom, position, state); \
-            next.code_it == nullptr)                                                     \
-        {                                                                                \
-            return;                                                                      \
-        }                                                                                \
-        else                                                                             \
-        {                                                                                \
-            /* Update current position only when no error,                               \
-               this improves compiler optimization. */                                   \
-            position = next;                                                             \
-        }                                                                                \
+#define ON_OPCODE(OPCODE)                                                                   \
+    case OPCODE:                                                                            \
+        ASM_COMMENT(OPCODE);                                                                \
+        if (const auto next = invoke<OPCODE>(cost_table, stack_bottom, position, state, g); \
+            next.code_it == nullptr)                                                        \
+        {                                                                                   \
+            return;                                                                         \
+        }                                                                                   \
+        else                                                                                \
+        {                                                                                   \
+            /* Update current position only when no error,                                  \
+               this improves compiler optimization. */                                      \
+            position = next;                                                                \
+        }                                                                                   \
         break;
 
             MAP_OPCODES
@@ -290,21 +293,23 @@ void dispatch_cgoto(
     // Code iterator and stack top pointer for interpreter loop.
     Position position{code, stack_bottom};
 
+    auto g = state.gas_left;
+
     goto* cgoto_table[*position.code_it];
 
-#define ON_OPCODE(OPCODE)                                                            \
-    TARGET_##OPCODE : ASM_COMMENT(OPCODE);                                           \
-    if (const auto next = invoke<OPCODE>(cost_table, stack_bottom, position, state); \
-        next.code_it == nullptr)                                                     \
-    {                                                                                \
-        return;                                                                      \
-    }                                                                                \
-    else                                                                             \
-    {                                                                                \
-        /* Update current position only when no error,                               \
-           this improves compiler optimization. */                                   \
-        position = next;                                                             \
-    }                                                                                \
+#define ON_OPCODE(OPCODE)                                                               \
+    TARGET_##OPCODE : ASM_COMMENT(OPCODE);                                              \
+    if (const auto next = invoke<OPCODE>(cost_table, stack_bottom, position, state, g); \
+        next.code_it == nullptr)                                                        \
+    {                                                                                   \
+        return;                                                                         \
+    }                                                                                   \
+    else                                                                                \
+    {                                                                                   \
+        /* Update current position only when no error,                                  \
+           this improves compiler optimization. */                                      \
+        position = next;                                                                \
+    }                                                                                   \
     goto* cgoto_table[*position.code_it];
 
     MAP_OPCODES
