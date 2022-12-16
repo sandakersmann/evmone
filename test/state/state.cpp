@@ -6,6 +6,7 @@
 #include "errors.hpp"
 #include "host.hpp"
 #include "rlp.hpp"
+#include <evmone/eips.hpp>
 #include <evmone/evmone.h>
 #include <evmone/execution_state.hpp>
 
