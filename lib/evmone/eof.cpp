@@ -202,11 +202,11 @@ EOFValidationError validate_instructions(evmc_revision rev, bytes_view code) noe
             return EOFValidationError::undefined_instruction;
 
         i += instr::traits[op].immediate_size;
+        if (i >= code.size())
+            return EOFValidationError::truncated_instruction;
+
         ++i;
     }
-
-    if (!instr::traits[op].is_terminating)
-        return EOFValidationError::missing_terminating_instruction;
 
     return EOFValidationError::success;
 }
