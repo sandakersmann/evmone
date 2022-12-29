@@ -194,14 +194,28 @@ EOFValidationError validate_instructions(evmc_revision rev, bytes_view code) noe
     const auto& cost_table = baseline::get_baseline_cost_table(rev, 1);
 
     size_t i = 0;
-    uint8_t op = code[0];
+    uint8_t op = 0;
     while (i < code.size())
     {
         op = code[i];
         if (cost_table[op] == instr::undefined)
             return EOFValidationError::undefined_instruction;
 
-        i += instr::traits[op].immediate_size;
+        if (op == OP_RJUMPV)
+        {
+            if (i + 1 < code.size())
+            {
+                const auto count = code[i + 1];
+                if (count < 1)
+                    return EOFValidationError::invalid_rjumpv_count;
+                i += static_cast<size_t>(1 /* count */ + count * 2 /* tbl */);
+            }
+            else
+                return EOFValidationError::truncated_instruction;
+        }
+        else
+            i += instr::traits[op].immediate_size;
+
         if (i >= code.size())
             return EOFValidationError::truncated_instruction;
 
@@ -232,6 +246,37 @@ bool validate_rjump_destinations(
             if (jumpdest < 0 || jumpdest >= code_size)
                 return false;
             rjumpdests.push_back(static_cast<size_t>(jumpdest));
+        }
+        else if (op == OP_RJUMPV)
+        {
+            constexpr auto REL_OFFSET_SIZE = sizeof(int16_t);
+
+            const auto count = container[op_pos + 1];
+
+            const auto post_offset =
+                static_cast<int32_t>(1 + 1 /* count */ + count * REL_OFFSET_SIZE /* tbl */);
+
+            for (size_t k = 0; k < count; ++k)
+            {
+                const auto rel_offset_hi =
+                    container[op_pos + 1 + 1 + static_cast<uint16_t>(k) * REL_OFFSET_SIZE];
+                const auto rel_offset_lo =
+                    container[op_pos + 1 + 2 + static_cast<uint16_t>(k) * REL_OFFSET_SIZE];
+                const auto rel_offset = static_cast<int16_t>((rel_offset_hi << 8) + rel_offset_lo);
+
+                const auto jumpdest = static_cast<int32_t>(i) + post_offset + rel_offset;
+
+                if (jumpdest < 0 || jumpdest >= code_size)
+                    return false;
+
+                rjumpdests.push_back(static_cast<size_t>(jumpdest));
+            }
+
+            const auto rjumpv_imm_size = size_t{1} + count * REL_OFFSET_SIZE;
+            std::fill_n(
+                immediate_map.begin() + static_cast<ptrdiff_t>(i) + 1, rjumpv_imm_size, true);
+            i += rjumpv_imm_size;
+            continue;
         }
 
         const auto imm_size = instr::traits[op].immediate_size;
