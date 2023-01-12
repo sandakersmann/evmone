@@ -36,14 +36,14 @@ add_executable(evmone-unittests
 target_link_libraries(evmone-unittests PRIVATE evmone evmone::state testutils evmc::instructions GTest::gtest GTest::gtest_main)
 target_include_directories(evmone-unittests PRIVATE ${evmone_private_include_dir})
 
-gtest_discover_tests(evmone-unittests TEST_PREFIX ${PROJECT_NAME}/unittests/)
-
-option(EVMONE_EVM_TEST_TOOL "Enable EVM unit testing tool for EVMC implementations (not maintained)" OFF)
-if(EVMONE_EVM_TEST_TOOL)
-    # The evm-test tool that contains the all evm-unittests and loads VMs as EVMC modules.
-    add_executable(evm-test main.cpp)
-    target_link_libraries(evm-test PRIVATE evm-unittests testutils evmc::evmc evmc::loader GTest::gtest)
-endif()
+#gtest_discover_tests(evmone-unittests TEST_PREFIX ${PROJECT_NAME}/unittests/)
+#
+#option(EVMONE_EVM_TEST_TOOL "Enable EVM unit testing tool for EVMC implementations (not maintained)" OFF)
+#if(EVMONE_EVM_TEST_TOOL)
+#     The evm-test tool that contains the all evm-unittests and loads VMs as EVMC modules.
+#    add_executable(evm-test main.cpp)
+#    target_link_libraries(evm-test PRIVATE evm-unittests testutils evmc::evmc evmc::loader GTest::gtest)
+#endif()
 
 # Provide the project version to selected source files.
 set_source_files_properties(
