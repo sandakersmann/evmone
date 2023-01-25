@@ -152,50 +152,56 @@ struct Position
 
 /// Helpers for invoking instruction implementations of different signatures.
 /// @{
-[[release_inline]] inline code_iterator invoke(
-    void (*instr_fn)(StackTop) noexcept, Position pos, ExecutionState& /*state*/) noexcept
+[[release_inline]] inline code_iterator invoke(void (*instr_fn)(StackTop) noexcept, Position pos,
+    int64_t& /*gas*/, ExecutionState& /*state*/) noexcept
 {
     instr_fn(pos.stack_top);
     return pos.code_it + 1;
 }
 
-[[release_inline]] inline code_iterator invoke(
-    StopToken (*instr_fn)() noexcept, Position /*pos*/, ExecutionState& state) noexcept
+[[release_inline]] inline code_iterator invoke(StopToken (*instr_fn)() noexcept, Position /*pos*/,
+    int64_t& /*gas*/, ExecutionState& state) noexcept
 {
     state.status = instr_fn().status;
     return nullptr;
 }
 
 [[release_inline]] inline code_iterator invoke(
-    evmc_status_code (*instr_fn)(StackTop, ExecutionState&) noexcept, Position pos,
+    evmc_status_code (*instr_fn)(StackTop, ExecutionState&) noexcept, Position pos, int64_t& gas,
     ExecutionState& state) noexcept
 {
+    state.gas_left = gas;
     if (const auto status = instr_fn(pos.stack_top, state); status != EVMC_SUCCESS)
     {
         state.status = status;
         return nullptr;
     }
+    gas = state.gas_left;
     return pos.code_it + 1;
 }
 
 [[release_inline]] inline code_iterator invoke(void (*instr_fn)(StackTop, ExecutionState&) noexcept,
-    Position pos, ExecutionState& state) noexcept
+    Position pos, int64_t& gas, ExecutionState& state) noexcept
 {
+    state.gas_left = gas;
     instr_fn(pos.stack_top, state);
+    gas = state.gas_left;
     return pos.code_it + 1;
 }
 
 [[release_inline]] inline code_iterator invoke(
     code_iterator (*instr_fn)(StackTop, ExecutionState&, code_iterator) noexcept, Position pos,
-    ExecutionState& state) noexcept
+    int64_t& gas, ExecutionState& state) noexcept
 {
+    state.gas_left = gas;
     return instr_fn(pos.stack_top, state, pos.code_it);
 }
 
 [[release_inline]] inline code_iterator invoke(
-    StopToken (*instr_fn)(StackTop, ExecutionState&) noexcept, Position pos,
+    StopToken (*instr_fn)(StackTop, ExecutionState&) noexcept, Position pos, int64_t& gas,
     ExecutionState& state) noexcept
 {
+    state.gas_left = gas;
     state.status = instr_fn(pos.stack_top, state).status;
     return nullptr;
 }
@@ -204,16 +210,15 @@ struct Position
 /// A helper to invoke the instruction implementation of the given opcode Op.
 template <Opcode Op>
 [[release_inline]] inline Position invoke(const CostTable& cost_table, const uint256* stack_bottom,
-    Position pos, ExecutionState& state) noexcept
+    Position pos, int64_t& gas, ExecutionState& state) noexcept
 {
-    if (const auto status =
-            check_requirements<Op>(cost_table, state.gas_left, pos.stack_top, stack_bottom);
+    if (const auto status = check_requirements<Op>(cost_table, gas, pos.stack_top, stack_bottom);
         status != EVMC_SUCCESS)
     {
         state.status = status;
         return {nullptr, pos.stack_top};
     }
-    const auto new_pos = invoke(instr::core::impl<Op>, pos, state);
+    const auto new_pos = invoke(instr::core::impl<Op>, pos, gas, state);
     const auto new_stack_top = pos.stack_top + instr::traits[Op].stack_height_change;
     return {new_pos, new_stack_top};
 }
@@ -224,6 +229,8 @@ void dispatch(const CostTable& cost_table, ExecutionState& state, const uint8_t*
     Tracer* tracer = nullptr) noexcept
 {
     const auto stack_bottom = state.stack_space.bottom();
+
+    auto gas = state.gas_left;
 
     // Code iterator and stack top pointer for interpreter loop.
     Position position{code, stack_bottom};
@@ -241,20 +248,20 @@ void dispatch(const CostTable& cost_table, ExecutionState& state, const uint8_t*
         const auto op = *position.code_it;
         switch (op)
         {
-#define ON_OPCODE(OPCODE)                                                                \
-    case OPCODE:                                                                         \
-        ASM_COMMENT(OPCODE);                                                             \
-        if (const auto next = invoke<OPCODE>(cost_table, stack_bottom, position, state); \
-            next.code_it == nullptr)                                                     \
-        {                                                                                \
-            return;                                                                      \
-        }                                                                                \
-        else                                                                             \
-        {                                                                                \
-            /* Update current position only when no error,                               \
-               this improves compiler optimization. */                                   \
-            position = next;                                                             \
-        }                                                                                \
+#define ON_OPCODE(OPCODE)                                                                     \
+    case OPCODE:                                                                              \
+        ASM_COMMENT(OPCODE);                                                                  \
+        if (const auto next = invoke<OPCODE>(cost_table, stack_bottom, position, gas, state); \
+            next.code_it == nullptr)                                                          \
+        {                                                                                     \
+            return;                                                                           \
+        }                                                                                     \
+        else                                                                                  \
+        {                                                                                     \
+            /* Update current position only when no error,                                    \
+               this improves compiler optimization. */                                        \
+            position = next;                                                                  \
+        }                                                                                     \
         break;
 
             MAP_OPCODES
@@ -289,21 +296,23 @@ void dispatch_cgoto(
     // Code iterator and stack top pointer for interpreter loop.
     Position position{code, stack_bottom};
 
+    auto gas = state.gas_left;
+
     goto* cgoto_table[*position.code_it];
 
-#define ON_OPCODE(OPCODE)                                                            \
-    TARGET_##OPCODE : ASM_COMMENT(OPCODE);                                           \
-    if (const auto next = invoke<OPCODE>(cost_table, stack_bottom, position, state); \
-        next.code_it == nullptr)                                                     \
-    {                                                                                \
-        return;                                                                      \
-    }                                                                                \
-    else                                                                             \
-    {                                                                                \
-        /* Update current position only when no error,                               \
-           this improves compiler optimization. */                                   \
-        position = next;                                                             \
-    }                                                                                \
+#define ON_OPCODE(OPCODE)                                                                 \
+    TARGET_##OPCODE : ASM_COMMENT(OPCODE);                                                \
+    if (const auto next = invoke<OPCODE>(cost_table, stack_bottom, position, gas, state); \
+        next.code_it == nullptr)                                                          \
+    {                                                                                     \
+        return;                                                                           \
+    }                                                                                     \
+    else                                                                                  \
+    {                                                                                     \
+        /* Update current position only when no error,                                    \
+           this improves compiler optimization. */                                        \
+        position = next;                                                                  \
+    }                                                                                     \
     goto* cgoto_table[*position.code_it];
 
     MAP_OPCODES
