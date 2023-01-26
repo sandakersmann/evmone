@@ -300,6 +300,12 @@ jobs:
       - build
       - test
       - package
+      - run:
+          name: "Install qemu"
+          command: sudo apt update -y && sudo apt install -y qemu-user-static
+      - run:
+          name: "Test CPU check"
+          command: (qemu-x86_64-static -cpu qemu64 bin/evmc run --vm ./lib/libevmone.so,trace 6000 2>&1 || true) | grep 'CPU does not support'
 
   release-windows:
     executor: win/server-2022
