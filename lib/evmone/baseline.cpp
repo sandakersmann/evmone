@@ -203,6 +203,7 @@ struct Position
 {
     state.gas_left = gas;
     state.status = instr_fn(pos.stack_top, state).status;
+    gas = state.gas_left;
     return nullptr;
 }
 /// @}
@@ -216,9 +217,11 @@ template <Opcode Op>
         status != EVMC_SUCCESS)
     {
         state.status = status;
+        state.gas_left = gas;
         return {nullptr, pos.stack_top};
     }
     const auto new_pos = invoke(instr::core::impl<Op>, pos, gas, state);
+    state.gas_left = gas;
     const auto new_stack_top = pos.stack_top + instr::traits[Op].stack_height_change;
     return {new_pos, new_stack_top};
 }
@@ -254,6 +257,7 @@ void dispatch(const CostTable& cost_table, ExecutionState& state, const uint8_t*
         if (const auto next = invoke<OPCODE>(cost_table, stack_bottom, position, gas, state); \
             next.code_it == nullptr)                                                          \
         {                                                                                     \
+            state.gas_left = gas;                                                             \
             return;                                                                           \
         }                                                                                     \
         else                                                                                  \
@@ -305,6 +309,7 @@ void dispatch_cgoto(
     if (const auto next = invoke<OPCODE>(cost_table, stack_bottom, position, gas, state); \
         next.code_it == nullptr)                                                          \
     {                                                                                     \
+        state.gas_left = gas;                                                             \
         return;                                                                           \
     }                                                                                     \
     else                                                                                  \
