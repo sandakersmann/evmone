@@ -36,6 +36,15 @@ inline evmc_status_code impl(AdvancedExecutionState& state) noexcept
     return status;
 }
 
+template <Opcode Op,
+    evmc_status_code CoreFn(StackTop, int64_t&, ExecutionState&) noexcept = core::impl<Op>>
+inline evmc_status_code impl(AdvancedExecutionState& state) noexcept
+{
+    const auto status = CoreFn(state.stack.top_item, state.gas_left, state);
+    state.stack.top_item += instr::traits[Op].stack_height_change;
+    return status;
+}
+
 template <Opcode Op, StopToken CoreFn() noexcept = core::impl<Op>>
 inline StopToken impl(AdvancedExecutionState& /*state*/) noexcept
 {
