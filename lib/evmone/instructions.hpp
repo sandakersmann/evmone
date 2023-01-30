@@ -490,14 +490,15 @@ inline void basefee(StackTop stack, ExecutionState& state) noexcept
     stack.push(intx::be::load<uint256>(state.get_tx_context().block_base_fee));
 }
 
-inline evmc_status_code extcodesize(StackTop stack, ExecutionState& state) noexcept
+inline evmc_status_code extcodesize(
+    StackTop stack, int64_t& gas_left, ExecutionState& state) noexcept
 {
     auto& x = stack.top();
     const auto addr = intx::be::trunc<evmc::address>(x);
 
     if (state.rev >= EVMC_BERLIN && state.host.access_account(addr) == EVMC_ACCESS_COLD)
     {
-        if ((state.gas_left -= instr::additional_cold_account_access_cost) < 0)
+        if ((gas_left -= instr::additional_cold_account_access_cost) < 0)
             return EVMC_OUT_OF_GAS;
     }
 
@@ -575,14 +576,15 @@ inline evmc_status_code returndatacopy(
     return EVMC_SUCCESS;
 }
 
-inline evmc_status_code extcodehash(StackTop stack, ExecutionState& state) noexcept
+inline evmc_status_code extcodehash(
+    StackTop stack, int64_t& gas_left, ExecutionState& state) noexcept
 {
     auto& x = stack.top();
     const auto addr = intx::be::trunc<evmc::address>(x);
 
     if (state.rev >= EVMC_BERLIN && state.host.access_account(addr) == EVMC_ACCESS_COLD)
     {
-        if ((state.gas_left -= instr::additional_cold_account_access_cost) < 0)
+        if ((gas_left -= instr::additional_cold_account_access_cost) < 0)
             return EVMC_OUT_OF_GAS;
     }
 
