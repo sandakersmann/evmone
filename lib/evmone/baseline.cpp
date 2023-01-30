@@ -179,19 +179,16 @@ struct Position
 }
 
 [[release_inline]] inline code_iterator invoke(void (*instr_fn)(StackTop, ExecutionState&) noexcept,
-    Position pos, int64_t& gas, ExecutionState& state) noexcept
+    Position pos, int64_t& /*gas*/, ExecutionState& state) noexcept
 {
-    state.gas_left = gas;
     instr_fn(pos.stack_top, state);
-    gas = state.gas_left;
     return pos.code_it + 1;
 }
 
 [[release_inline]] inline code_iterator invoke(
     code_iterator (*instr_fn)(StackTop, ExecutionState&, code_iterator) noexcept, Position pos,
-    int64_t& gas, ExecutionState& state) noexcept
+    int64_t& /*gas*/, ExecutionState& state) noexcept
 {
-    state.gas_left = gas;
     return instr_fn(pos.stack_top, state, pos.code_it);
 }
 
@@ -213,11 +210,9 @@ template <Opcode Op>
         status != EVMC_SUCCESS)
     {
         state.status = status;
-        state.gas_left = gas;
         return {nullptr, pos.stack_top};
     }
     const auto new_pos = invoke(instr::core::impl<Op>, pos, gas, state);
-    state.gas_left = gas;
     const auto new_stack_top = pos.stack_top + instr::traits[Op].stack_height_change;
     return {new_pos, new_stack_top};
 }
