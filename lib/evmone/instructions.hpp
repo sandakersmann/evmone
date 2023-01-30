@@ -905,12 +905,12 @@ inline constexpr auto create = create_impl<OP_CREATE>;
 inline constexpr auto create2 = create_impl<OP_CREATE2>;
 
 template <evmc_status_code StatusCode>
-inline StopToken return_impl(StackTop stack, ExecutionState& state) noexcept
+inline StopToken return_impl(StackTop stack, int64_t& gas_left, ExecutionState& state) noexcept
 {
     const auto& offset = stack[0];
     const auto& size = stack[1];
 
-    if (!check_memory(state.gas_left, state, offset, size))
+    if (!check_memory(gas_left, state, offset, size))
         return {EVMC_OUT_OF_GAS};
 
     state.output_size = static_cast<size_t>(size);
@@ -921,7 +921,7 @@ inline StopToken return_impl(StackTop stack, ExecutionState& state) noexcept
 inline constexpr auto return_ = return_impl<EVMC_SUCCESS>;
 inline constexpr auto revert = return_impl<EVMC_REVERT>;
 
-inline StopToken selfdestruct(StackTop stack, ExecutionState& state) noexcept
+inline StopToken selfdestruct(StackTop stack, int64_t& gas_left, ExecutionState& state) noexcept
 {
     if (state.in_static_mode())
         return {EVMC_STATIC_MODE_VIOLATION};
@@ -930,7 +930,7 @@ inline StopToken selfdestruct(StackTop stack, ExecutionState& state) noexcept
 
     if (state.rev >= EVMC_BERLIN && state.host.access_account(beneficiary) == EVMC_ACCESS_COLD)
     {
-        if ((state.gas_left -= instr::cold_account_access_cost) < 0)
+        if ((gas_left -= instr::cold_account_access_cost) < 0)
             return {EVMC_OUT_OF_GAS};
     }
 
@@ -942,7 +942,7 @@ inline StopToken selfdestruct(StackTop stack, ExecutionState& state) noexcept
             // sending value to a non-existing account.
             if (!state.host.account_exists(beneficiary))
             {
-                if ((state.gas_left -= 25000) < 0)
+                if ((gas_left -= 25000) < 0)
                     return {EVMC_OUT_OF_GAS};
             }
         }

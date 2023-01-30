@@ -51,11 +51,12 @@ inline StopToken impl(AdvancedExecutionState& /*state*/) noexcept
     return CoreFn();
 }
 
-template <Opcode Op, StopToken CoreFn(StackTop, ExecutionState&) noexcept = core::impl<Op>>
+template <Opcode Op,
+    StopToken CoreFn(StackTop, int64_t&, ExecutionState&) noexcept = core::impl<Op>>
 inline StopToken impl(AdvancedExecutionState& state) noexcept
 {
     // Stack height adjustment may be omitted.
-    return CoreFn(state.stack.top_item, state);
+    return CoreFn(state.stack.top_item, state.gas_left, state);
 }
 
 template <Opcode Op,
