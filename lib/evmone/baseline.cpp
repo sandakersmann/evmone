@@ -167,20 +167,6 @@ struct Position
 }
 
 [[release_inline]] inline code_iterator invoke(
-    evmc_status_code (*instr_fn)(StackTop, ExecutionState&) noexcept, Position pos, int64_t& gas,
-    ExecutionState& state) noexcept
-{
-    state.gas_left = gas;
-    if (const auto status = instr_fn(pos.stack_top, state); status != EVMC_SUCCESS)
-    {
-        state.status = status;
-        return nullptr;
-    }
-    gas = state.gas_left;
-    return pos.code_it + 1;
-}
-
-[[release_inline]] inline code_iterator invoke(
     evmc_status_code (*instr_fn)(StackTop, int64_t&, ExecutionState&) noexcept, Position pos,
     int64_t& gas, ExecutionState& state) noexcept
 {
