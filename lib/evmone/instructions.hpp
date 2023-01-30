@@ -896,14 +896,14 @@ inline evmc_status_code log(StackTop stack, int64_t& gas_left, ExecutionState& s
 
 
 template <Opcode Op>
-evmc_status_code call_impl(StackTop stack, ExecutionState& state) noexcept;
+evmc_status_code call_impl(StackTop stack, int64_t& gas_left, ExecutionState& state) noexcept;
 inline constexpr auto call = call_impl<OP_CALL>;
 inline constexpr auto callcode = call_impl<OP_CALLCODE>;
 inline constexpr auto delegatecall = call_impl<OP_DELEGATECALL>;
 inline constexpr auto staticcall = call_impl<OP_STATICCALL>;
 
 template <Opcode Op>
-evmc_status_code create_impl(StackTop stack, ExecutionState& state) noexcept;
+evmc_status_code create_impl(StackTop stack, int64_t& gas_left, ExecutionState& state) noexcept;
 inline constexpr auto create = create_impl<OP_CREATE>;
 inline constexpr auto create2 = create_impl<OP_CREATE2>;
 
