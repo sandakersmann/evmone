@@ -678,9 +678,9 @@ inline evmc_status_code mstore8(StackTop stack, int64_t& gas_left, ExecutionStat
     return EVMC_SUCCESS;
 }
 
-evmc_status_code sload(StackTop stack, ExecutionState& state) noexcept;
+evmc_status_code sload(StackTop stack, int64_t& gas_left, ExecutionState& state) noexcept;
 
-evmc_status_code sstore(StackTop stack, ExecutionState& state) noexcept;
+evmc_status_code sstore(StackTop stack, int64_t& gas_left, ExecutionState& state) noexcept;
 
 /// Internal jump implementation for JUMP/JUMPI instructions.
 inline code_iterator jump_impl(ExecutionState& state, const uint256& dst) noexcept
