@@ -3,23 +3,38 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "baseline.hpp"
+#include "baseline_instruction_table.hpp"
+#include "eof.hpp"
 #include "execution_state.hpp"
 #include "instructions.hpp"
 #include "vm.hpp"
-#include <evmc/instructions.h>
 #include <memory>
+
+#ifdef NDEBUG
+#define release_inline gnu::always_inline, msvc::forceinline
+#else
+#define release_inline
+#endif
+
+#if defined(__GNUC__)
+#define ASM_COMMENT(COMMENT) asm("# " #COMMENT)  // NOLINT(hicpp-no-assembler)
+#else
+#define ASM_COMMENT(COMMENT)
+#endif
 
 namespace evmone::baseline
 {
-CodeAnalysis analyze(const uint8_t* code, size_t code_size)
+namespace
+{
+CodeAnalysis::JumpdestMap analyze_jumpdests(bytes_view code)
 {
     // To find if op is any PUSH opcode (OP_PUSH1 <= op <= OP_PUSH32)
     // it can be noticed that OP_PUSH32 is INT8_MAX (0x7f) therefore
     // static_cast<int8_t>(op) <= OP_PUSH32 is always true and can be skipped.
     static_assert(OP_PUSH32 == std::numeric_limits<int8_t>::max());
 
-    CodeAnalysis::JumpdestMap map(code_size);  // Allocate and init bitmap with zeros.
-    for (size_t i = 0; i < code_size; ++i)
+    CodeAnalysis::JumpdestMap map(code.size());  // Allocate and init bitmap with zeros.
+    for (size_t i = 0; i < code.size(); ++i)
     {
         const auto op = code[i];
         if (static_cast<int8_t>(op) >= OP_PUSH1)  // If any PUSH opcode (see explanation above).
@@ -27,760 +42,324 @@ CodeAnalysis analyze(const uint8_t* code, size_t code_size)
         else if (INTX_UNLIKELY(op == OP_JUMPDEST))
             map[i] = true;
     }
-    return CodeAnalysis{std::move(map)};
+
+    return map;
+}
+
+std::unique_ptr<uint8_t[]> pad_code(bytes_view code)
+{
+    // We need at most 33 bytes of code padding: 32 for possible missing all data bytes of PUSH32
+    // at the very end of the code; and one more byte for STOP to guarantee there is a terminating
+    // instruction at the code end.
+    constexpr auto padding = 32 + 1;
+
+    // Using "raw" new operator instead of std::make_unique() to get uninitialized array.
+    std::unique_ptr<uint8_t[]> padded_code{new uint8_t[code.size() + padding]};
+    std::copy(std::begin(code), std::end(code), padded_code.get());
+    std::fill_n(&padded_code[code.size()], padding, uint8_t{OP_STOP});
+    return padded_code;
+}
+
+
+CodeAnalysis analyze_legacy(bytes_view code)
+{
+    // TODO: The padded code buffer and jumpdest bitmap can be created with single allocation.
+    return {pad_code(code), code.size(), analyze_jumpdests(code)};
+}
+
+CodeAnalysis analyze_eof1(bytes_view eof_container, const EOF1Header& header)
+{
+    const auto executable_code = eof_container.substr(header.code_begin(), header.code_size);
+    return {executable_code, analyze_jumpdests(executable_code)};
+}
+}  // namespace
+
+CodeAnalysis analyze(evmc_revision rev, bytes_view code)
+{
+    if (rev < EVMC_SHANGHAI || !is_eof_code(code))
+        return analyze_legacy(code);
+
+    const auto eof1_header = read_valid_eof1_header(code.begin());
+    return analyze_eof1(code, eof1_header);
 }
 
 namespace
 {
-const uint8_t* op_jump(
-    ExecutionState& state, const CodeAnalysis::JumpdestMap& jumpdest_map) noexcept
+/// Checks instruction requirements before execution.
+///
+/// This checks:
+/// - if the instruction is defined
+/// - if stack height requirements are fulfilled (stack overflow, stack underflow)
+/// - charges the instruction base gas cost and checks is there is any gas left.
+///
+/// @tparam         Op            Instruction opcode.
+/// @param          cost_table    Table of base gas costs.
+/// @param [in,out] gas_left      Gas left.
+/// @param          stack_top     Pointer to the stack top item.
+/// @param          stack_bottom  Pointer to the stack bottom.
+///                               The stack height is stack_top - stack_bottom.
+/// @return  Status code with information which check has failed
+///          or EVMC_SUCCESS if everything is fine.
+template <Opcode Op>
+inline evmc_status_code check_requirements(const CostTable& cost_table, int64_t& gas_left,
+    const uint256* stack_top, const uint256* stack_bottom) noexcept
 {
-    const auto dst = state.stack.pop();
-    if (dst >= jumpdest_map.size() || !jumpdest_map[static_cast<size_t>(dst)])
+    static_assert(
+        !instr::has_const_gas_cost(Op) || instr::gas_costs[EVMC_FRONTIER][Op] != instr::undefined,
+        "undefined instructions must not be handled by check_requirements()");
+
+    auto gas_cost = instr::gas_costs[EVMC_FRONTIER][Op];  // Init assuming const cost.
+    if constexpr (!instr::has_const_gas_cost(Op))
     {
-        state.status = EVMC_BAD_JUMP_DESTINATION;
-        return &state.code[0] + state.code.size();
+        gas_cost = cost_table[Op];  // If not, load the cost from the table.
+
+        // Negative cost marks an undefined instruction.
+        // This check must be first to produce correct error code.
+        if (INTX_UNLIKELY(gas_cost < 0))
+            return EVMC_UNDEFINED_INSTRUCTION;
     }
 
-    return &state.code[static_cast<size_t>(dst)];
-}
-
-template <size_t Len>
-inline const uint8_t* load_push(
-    ExecutionState& state, const uint8_t* code, const uint8_t* code_end) noexcept
-{
-    // TODO: Also last full push can be ignored.
-    if (code + Len > code_end)  // Trimmed push data can be ignored.
-        return code_end;
-
-    uint8_t buffer[Len];
-    std::memcpy(buffer, code, Len);
-    state.stack.push(intx::be::load<intx::uint256>(buffer));
-    return code + Len;
-}
-
-template <evmc_status_code StatusCode>
-inline void op_return(ExecutionState& state) noexcept
-{
-    const auto offset = state.stack[0];
-    const auto size = state.stack[1];
-
-    if (!check_memory(state, offset, size))
+    // Check stack requirements first. This is order is not required,
+    // but it is nicer because complete gas check may need to inspect operands.
+    if constexpr (instr::traits[Op].stack_height_change > 0)
     {
-        state.status = EVMC_OUT_OF_GAS;
-        return;
+        static_assert(instr::traits[Op].stack_height_change == 1,
+            "unexpected instruction with multiple results");
+        if (INTX_UNLIKELY(stack_top == stack_bottom + StackSpace::limit))
+            return EVMC_STACK_OVERFLOW;
+    }
+    if constexpr (instr::traits[Op].stack_height_required > 0)
+    {
+        // Check stack underflow using pointer comparison <= (better optimization).
+        static constexpr auto min_offset = instr::traits[Op].stack_height_required - 1;
+        if (INTX_UNLIKELY(stack_top <= stack_bottom + min_offset))
+            return EVMC_STACK_UNDERFLOW;
     }
 
-    state.output_offset = static_cast<size_t>(offset);  // Can be garbage if size is 0.
-    state.output_size = static_cast<size_t>(size);
-    state.status = StatusCode;
-}
-
-inline evmc_status_code check_requirements(const char* const* instruction_names,
-    const evmc_instruction_metrics* instruction_metrics, ExecutionState& state, uint8_t op) noexcept
-{
-    const auto metrics = instruction_metrics[op];
-
-    if (instruction_names[op] == nullptr)
-        return EVMC_UNDEFINED_INSTRUCTION;
-
-    if ((state.gas_left -= metrics.gas_cost) < 0)
+    if (INTX_UNLIKELY((gas_left -= gas_cost) < 0))
         return EVMC_OUT_OF_GAS;
-
-    const auto stack_size = state.stack.size();
-    if (stack_size < metrics.stack_height_required)
-        return EVMC_STACK_UNDERFLOW;
-    if (stack_size + metrics.stack_height_change > Stack::limit)
-        return EVMC_STACK_OVERFLOW;
 
     return EVMC_SUCCESS;
 }
 
-template <bool TracingEnabled>
-evmc_result execute(const VM& vm, ExecutionState& state, const CodeAnalysis& analysis) noexcept
+
+/// The execution position.
+struct Position
 {
-    auto* tracer = vm.get_tracer();
-    if constexpr (TracingEnabled)
-        tracer->notify_execution_start(state.rev, *state.msg, state.code);
+    code_iterator code_it;  ///< The position in the code.
+    uint256* stack_top;     ///< The pointer to the stack top.
+};
 
-    const auto rev = state.rev;
-    const auto code = state.code.data();
-    const auto code_size = state.code.size();
+/// Helpers for invoking instruction implementations of different signatures.
+/// @{
+[[release_inline]] inline code_iterator invoke(
+    void (*instr_fn)(StackTop) noexcept, Position pos, ExecutionState& /*state*/) noexcept
+{
+    instr_fn(pos.stack_top);
+    return pos.code_it + 1;
+}
 
-    const auto instruction_names = evmc_get_instruction_names_table(rev);
-    const auto instruction_metrics = evmc_get_instruction_metrics_table(rev);
+[[release_inline]] inline code_iterator invoke(
+    StopToken (*instr_fn)() noexcept, Position /*pos*/, ExecutionState& state) noexcept
+{
+    state.status = instr_fn().status;
+    return nullptr;
+}
 
-    const auto code_end = code + code_size;
-    auto* pc = code;
-    while (pc != code_end)
+[[release_inline]] inline code_iterator invoke(
+    evmc_status_code (*instr_fn)(StackTop, ExecutionState&) noexcept, Position pos,
+    ExecutionState& state) noexcept
+{
+    if (const auto status = instr_fn(pos.stack_top, state); status != EVMC_SUCCESS)
+    {
+        state.status = status;
+        return nullptr;
+    }
+    return pos.code_it + 1;
+}
+
+[[release_inline]] inline code_iterator invoke(void (*instr_fn)(StackTop, ExecutionState&) noexcept,
+    Position pos, ExecutionState& state) noexcept
+{
+    instr_fn(pos.stack_top, state);
+    return pos.code_it + 1;
+}
+
+[[release_inline]] inline code_iterator invoke(
+    code_iterator (*instr_fn)(StackTop, ExecutionState&, code_iterator) noexcept, Position pos,
+    ExecutionState& state) noexcept
+{
+    return instr_fn(pos.stack_top, state, pos.code_it);
+}
+
+[[release_inline]] inline code_iterator invoke(
+    StopToken (*instr_fn)(StackTop, ExecutionState&) noexcept, Position pos,
+    ExecutionState& state) noexcept
+{
+    state.status = instr_fn(pos.stack_top, state).status;
+    return nullptr;
+}
+/// @}
+
+/// A helper to invoke the instruction implementation of the given opcode Op.
+template <Opcode Op>
+[[release_inline]] inline Position invoke(const CostTable& cost_table, const uint256* stack_bottom,
+    Position pos, ExecutionState& state) noexcept
+{
+    if (const auto status =
+            check_requirements<Op>(cost_table, state.gas_left, pos.stack_top, stack_bottom);
+        status != EVMC_SUCCESS)
+    {
+        state.status = status;
+        return {nullptr, pos.stack_top};
+    }
+    const auto new_pos = invoke(instr::core::impl<Op>, pos, state);
+    const auto new_stack_top = pos.stack_top + instr::traits[Op].stack_height_change;
+    return {new_pos, new_stack_top};
+}
+
+
+template <bool TracingEnabled>
+void dispatch(const CostTable& cost_table, ExecutionState& state, const uint8_t* code,
+    Tracer* tracer = nullptr) noexcept
+{
+    const auto stack_bottom = state.stack_space.bottom();
+
+    // Code iterator and stack top pointer for interpreter loop.
+    Position position{code, stack_bottom};
+
+    while (true)  // Guaranteed to terminate because padded code ends with STOP.
     {
         if constexpr (TracingEnabled)
-            tracer->notify_instruction_start(static_cast<uint32_t>(pc - code));
-
-        const auto op = *pc;
-        const auto status = check_requirements(instruction_names, instruction_metrics, state, op);
-        if (status != EVMC_SUCCESS)
         {
-            state.status = status;
-            goto exit;
+            const auto offset = static_cast<uint32_t>(position.code_it - code);
+            const auto stack_height = static_cast<int>(position.stack_top - stack_bottom);
+            if (offset < state.original_code.size())  // Skip STOP from code padding.
+                tracer->notify_instruction_start(offset, position.stack_top, stack_height, state);
         }
 
+        const auto op = *position.code_it;
         switch (op)
         {
-        case OP_STOP:
-            goto exit;
-        case OP_ADD:
-            add(state.stack);
-            break;
-        case OP_MUL:
-            mul(state.stack);
-            break;
-        case OP_SUB:
-            sub(state.stack);
-            break;
-        case OP_DIV:
-            div(state.stack);
-            break;
-        case OP_SDIV:
-            sdiv(state.stack);
-            break;
-        case OP_MOD:
-            mod(state.stack);
-            break;
-        case OP_SMOD:
-            smod(state.stack);
-            break;
-        case OP_ADDMOD:
-            addmod(state.stack);
-            break;
-        case OP_MULMOD:
-            mulmod(state.stack);
-            break;
-        case OP_EXP:
-        {
-            const auto status_code = exp(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_SIGNEXTEND:
-            signextend(state.stack);
-            break;
+#define ON_OPCODE(OPCODE)                                                                \
+    case OPCODE:                                                                         \
+        ASM_COMMENT(OPCODE);                                                             \
+        if (const auto next = invoke<OPCODE>(cost_table, stack_bottom, position, state); \
+            next.code_it == nullptr)                                                     \
+        {                                                                                \
+            return;                                                                      \
+        }                                                                                \
+        else                                                                             \
+        {                                                                                \
+            /* Update current position only when no error,                               \
+               this improves compiler optimization. */                                   \
+            position = next;                                                             \
+        }                                                                                \
+        break;
 
-        case OP_LT:
-            lt(state.stack);
-            break;
-        case OP_GT:
-            gt(state.stack);
-            break;
-        case OP_SLT:
-            slt(state.stack);
-            break;
-        case OP_SGT:
-            sgt(state.stack);
-            break;
-        case OP_EQ:
-            eq(state.stack);
-            break;
-        case OP_ISZERO:
-            iszero(state.stack);
-            break;
-        case OP_AND:
-            and_(state.stack);
-            break;
-        case OP_OR:
-            or_(state.stack);
-            break;
-        case OP_XOR:
-            xor_(state.stack);
-            break;
-        case OP_NOT:
-            not_(state.stack);
-            break;
-        case OP_BYTE:
-            byte(state.stack);
-            break;
-        case OP_SHL:
-            shl(state.stack);
-            break;
-        case OP_SHR:
-            shr(state.stack);
-            break;
-        case OP_SAR:
-            sar(state.stack);
-            break;
+            MAP_OPCODES
+#undef ON_OPCODE
 
-        case OP_KECCAK256:
-        {
-            const auto status_code = keccak256(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-
-        case OP_ADDRESS:
-            address(state);
-            break;
-        case OP_BALANCE:
-        {
-            const auto status_code = balance(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_ORIGIN:
-            origin(state);
-            break;
-        case OP_CALLER:
-            caller(state);
-            break;
-        case OP_CALLVALUE:
-            callvalue(state);
-            break;
-        case OP_CALLDATALOAD:
-            calldataload(state);
-            break;
-        case OP_CALLDATASIZE:
-            calldatasize(state);
-            break;
-        case OP_CALLDATACOPY:
-        {
-            const auto status_code = calldatacopy(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_CODESIZE:
-            state.stack.push(code_size);
-            break;
-        case OP_CODECOPY:
-        {
-            const auto status_code = codecopy(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_GASPRICE:
-            gasprice(state);
-            break;
-        case OP_EXTCODESIZE:
-        {
-            const auto status_code = extcodesize(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_EXTCODECOPY:
-        {
-            const auto status_code = extcodecopy(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_RETURNDATASIZE:
-            returndatasize(state);
-            break;
-        case OP_RETURNDATACOPY:
-        {
-            const auto status_code = returndatacopy(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_EXTCODEHASH:
-        {
-            const auto status_code = extcodehash(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_BLOCKHASH:
-            blockhash(state);
-            break;
-        case OP_COINBASE:
-            coinbase(state);
-            break;
-        case OP_TIMESTAMP:
-            timestamp(state);
-            break;
-        case OP_NUMBER:
-            number(state);
-            break;
-        case OP_DIFFICULTY:
-            difficulty(state);
-            break;
-        case OP_GASLIMIT:
-            gaslimit(state);
-            break;
-        case OP_CHAINID:
-            chainid(state);
-            break;
-        case OP_SELFBALANCE:
-            selfbalance(state);
-            break;
-
-        case OP_POP:
-            pop(state.stack);
-            break;
-        case OP_MLOAD:
-        {
-            const auto status_code = mload(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_MSTORE:
-        {
-            const auto status_code = mstore(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_MSTORE8:
-        {
-            const auto status_code = mstore8(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-
-        case OP_JUMP:
-            pc = op_jump(state, analysis.jumpdest_map);
-            continue;
-        case OP_JUMPI:
-            if (state.stack[1] != 0)
-            {
-                pc = op_jump(state, analysis.jumpdest_map);
-            }
-            else
-            {
-                state.stack.pop();
-                ++pc;
-            }
-            state.stack.pop();
-            continue;
-
-        case OP_PC:
-            state.stack.push(pc - code);
-            break;
-        case OP_MSIZE:
-            msize(state);
-            break;
-        case OP_SLOAD:
-        {
-            const auto status_code = sload(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_SSTORE:
-        {
-            const auto status_code = sstore(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_GAS:
-            state.stack.push(state.gas_left);
-            break;
-        case OP_JUMPDEST:
-            break;
-
-        case OP_PUSH1:
-            pc = load_push<1>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH2:
-            pc = load_push<2>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH3:
-            pc = load_push<3>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH4:
-            pc = load_push<4>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH5:
-            pc = load_push<5>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH6:
-            pc = load_push<6>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH7:
-            pc = load_push<7>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH8:
-            pc = load_push<8>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH9:
-            pc = load_push<9>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH10:
-            pc = load_push<10>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH11:
-            pc = load_push<11>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH12:
-            pc = load_push<12>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH13:
-            pc = load_push<13>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH14:
-            pc = load_push<14>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH15:
-            pc = load_push<15>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH16:
-            pc = load_push<16>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH17:
-            pc = load_push<17>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH18:
-            pc = load_push<18>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH19:
-            pc = load_push<19>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH20:
-            pc = load_push<20>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH21:
-            pc = load_push<21>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH22:
-            pc = load_push<22>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH23:
-            pc = load_push<23>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH24:
-            pc = load_push<24>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH25:
-            pc = load_push<25>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH26:
-            pc = load_push<26>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH27:
-            pc = load_push<27>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH28:
-            pc = load_push<28>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH29:
-            pc = load_push<29>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH30:
-            pc = load_push<30>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH31:
-            pc = load_push<31>(state, pc + 1, code_end);
-            continue;
-        case OP_PUSH32:
-            pc = load_push<32>(state, pc + 1, code_end);
-            continue;
-
-        case OP_DUP1:
-            dup<1>(state.stack);
-            break;
-        case OP_DUP2:
-            dup<2>(state.stack);
-            break;
-        case OP_DUP3:
-            dup<3>(state.stack);
-            break;
-        case OP_DUP4:
-            dup<4>(state.stack);
-            break;
-        case OP_DUP5:
-            dup<5>(state.stack);
-            break;
-        case OP_DUP6:
-            dup<6>(state.stack);
-            break;
-        case OP_DUP7:
-            dup<7>(state.stack);
-            break;
-        case OP_DUP8:
-            dup<8>(state.stack);
-            break;
-        case OP_DUP9:
-            dup<9>(state.stack);
-            break;
-        case OP_DUP10:
-            dup<10>(state.stack);
-            break;
-        case OP_DUP11:
-            dup<11>(state.stack);
-            break;
-        case OP_DUP12:
-            dup<12>(state.stack);
-            break;
-        case OP_DUP13:
-            dup<13>(state.stack);
-            break;
-        case OP_DUP14:
-            dup<14>(state.stack);
-            break;
-        case OP_DUP15:
-            dup<15>(state.stack);
-            break;
-        case OP_DUP16:
-            dup<16>(state.stack);
-            break;
-
-        case OP_SWAP1:
-            swap<1>(state.stack);
-            break;
-        case OP_SWAP2:
-            swap<2>(state.stack);
-            break;
-        case OP_SWAP3:
-            swap<3>(state.stack);
-            break;
-        case OP_SWAP4:
-            swap<4>(state.stack);
-            break;
-        case OP_SWAP5:
-            swap<5>(state.stack);
-            break;
-        case OP_SWAP6:
-            swap<6>(state.stack);
-            break;
-        case OP_SWAP7:
-            swap<7>(state.stack);
-            break;
-        case OP_SWAP8:
-            swap<8>(state.stack);
-            break;
-        case OP_SWAP9:
-            swap<9>(state.stack);
-            break;
-        case OP_SWAP10:
-            swap<10>(state.stack);
-            break;
-        case OP_SWAP11:
-            swap<11>(state.stack);
-            break;
-        case OP_SWAP12:
-            swap<12>(state.stack);
-            break;
-        case OP_SWAP13:
-            swap<13>(state.stack);
-            break;
-        case OP_SWAP14:
-            swap<14>(state.stack);
-            break;
-        case OP_SWAP15:
-            swap<15>(state.stack);
-            break;
-        case OP_SWAP16:
-            swap<16>(state.stack);
-            break;
-
-        case OP_LOG0:
-        {
-            const auto status_code = log(state, 0);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_LOG1:
-        {
-            const auto status_code = log(state, 1);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_LOG2:
-        {
-            const auto status_code = log(state, 2);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_LOG3:
-        {
-            const auto status_code = log(state, 3);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_LOG4:
-        {
-            const auto status_code = log(state, 4);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-
-        case OP_CREATE:
-        {
-            const auto status_code = create<EVMC_CREATE>(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_CALL:
-        {
-            const auto status_code = call<EVMC_CALL>(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_CALLCODE:
-        {
-            const auto status_code = call<EVMC_CALLCODE>(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_RETURN:
-            op_return<EVMC_SUCCESS>(state);
-            goto exit;
-        case OP_DELEGATECALL:
-        {
-            const auto status_code = call<EVMC_DELEGATECALL>(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_STATICCALL:
-        {
-            const auto status_code = call<EVMC_CALL, true>(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_CREATE2:
-        {
-            const auto status_code = create<EVMC_CREATE2>(state);
-            if (status_code != EVMC_SUCCESS)
-            {
-                state.status = status_code;
-                goto exit;
-            }
-            break;
-        }
-        case OP_REVERT:
-            op_return<EVMC_REVERT>(state);
-            goto exit;
-        case OP_INVALID:
-            state.status = EVMC_INVALID_INSTRUCTION;
-            goto exit;
-        case OP_SELFDESTRUCT:
-            state.status = selfdestruct(state);
-            goto exit;
         default:
-            INTX_UNREACHABLE();
+            state.status = EVMC_UNDEFINED_INSTRUCTION;
+            return;
         }
-
-        ++pc;
     }
-
-exit:
-    const auto gas_left =
-        (state.status == EVMC_SUCCESS || state.status == EVMC_REVERT) ? state.gas_left : 0;
-
-    const auto result = evmc::make_result(state.status, gas_left,
-        state.output_size != 0 ? &state.memory[state.output_offset] : nullptr, state.output_size);
-
-    if constexpr (TracingEnabled)
-        tracer->notify_execution_end(result);
-
-    return result;
 }
+
+#if EVMONE_CGOTO_SUPPORTED
+void dispatch_cgoto(
+    const CostTable& cost_table, ExecutionState& state, const uint8_t* code) noexcept
+{
+#pragma GCC diagnostic ignored "-Wpedantic"
+
+    static constexpr void* cgoto_table[] = {
+#define ON_OPCODE(OPCODE) &&TARGET_##OPCODE,
+#undef ON_OPCODE_UNDEFINED
+#define ON_OPCODE_UNDEFINED(_) &&TARGET_OP_UNDEFINED,
+        MAP_OPCODES
+#undef ON_OPCODE
+#undef ON_OPCODE_UNDEFINED
+#define ON_OPCODE_UNDEFINED ON_OPCODE_UNDEFINED_DEFAULT
+    };
+    static_assert(std::size(cgoto_table) == 256);
+
+    const auto stack_bottom = state.stack_space.bottom();
+
+    // Code iterator and stack top pointer for interpreter loop.
+    Position position{code, stack_bottom};
+
+    goto* cgoto_table[*position.code_it];
+
+#define ON_OPCODE(OPCODE)                                                            \
+    TARGET_##OPCODE : ASM_COMMENT(OPCODE);                                           \
+    if (const auto next = invoke<OPCODE>(cost_table, stack_bottom, position, state); \
+        next.code_it == nullptr)                                                     \
+    {                                                                                \
+        return;                                                                      \
+    }                                                                                \
+    else                                                                             \
+    {                                                                                \
+        /* Update current position only when no error,                               \
+           this improves compiler optimization. */                                   \
+        position = next;                                                             \
+    }                                                                                \
+    goto* cgoto_table[*position.code_it];
+
+    MAP_OPCODES
+#undef ON_OPCODE
+
+TARGET_OP_UNDEFINED:
+    state.status = EVMC_UNDEFINED_INSTRUCTION;
+}
+#endif
 }  // namespace
 
 evmc_result execute(const VM& vm, ExecutionState& state, const CodeAnalysis& analysis) noexcept
 {
-    if (INTX_UNLIKELY(vm.get_tracer() != nullptr))
-        return execute<true>(vm, state, analysis);
+    state.analysis.baseline = &analysis;  // Assign code analysis for instruction implementations.
 
-    return execute<false>(vm, state, analysis);
+    const auto code = analysis.executable_code;
+
+    const auto& cost_table = get_baseline_cost_table(state.rev);
+
+    auto* tracer = vm.get_tracer();
+    if (INTX_UNLIKELY(tracer != nullptr))
+    {
+        tracer->notify_execution_start(state.rev, *state.msg, analysis.executable_code);
+        dispatch<true>(cost_table, state, code.data(), tracer);
+    }
+    else
+    {
+#if EVMONE_CGOTO_SUPPORTED
+        if (vm.cgoto)
+            dispatch_cgoto(cost_table, state, code.data());
+        else
+#endif
+            dispatch<false>(cost_table, state, code.data());
+    }
+
+    const auto gas_left =
+        (state.status == EVMC_SUCCESS || state.status == EVMC_REVERT) ? state.gas_left : 0;
+    const auto gas_refund = (state.status == EVMC_SUCCESS) ? state.gas_refund : 0;
+
+    assert(state.output_size != 0 || state.output_offset == 0);
+    const auto result = evmc::make_result(state.status, gas_left, gas_refund,
+        state.output_size != 0 ? &state.memory[state.output_offset] : nullptr, state.output_size);
+
+    if (INTX_UNLIKELY(tracer != nullptr))
+        tracer->notify_execution_end(result);
+
+    return result;
 }
 
 evmc_result execute(evmc_vm* c_vm, const evmc_host_interface* host, evmc_host_context* ctx,
     evmc_revision rev, const evmc_message* msg, const uint8_t* code, size_t code_size) noexcept
 {
     auto vm = static_cast<VM*>(c_vm);
-    const auto jumpdest_map = analyze(code, code_size);
-    auto state = std::make_unique<ExecutionState>(*msg, rev, *host, ctx, code, code_size);
+    const auto jumpdest_map = analyze(rev, {code, code_size});
+    auto state =
+        std::make_unique<ExecutionState>(*msg, rev, *host, ctx, bytes_view{code, code_size});
     return execute(*vm, *state, jumpdest_map);
 }
 }  // namespace evmone::baseline

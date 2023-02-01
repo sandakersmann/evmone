@@ -2,7 +2,7 @@
 # Copyright 2019 The evmone Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-cmake_minimum_required(VERSION 3.13)
+cmake_minimum_required(VERSION 3.16...3.24)
 
 if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/evmc/.git)
     message(FATAL_ERROR "Git submodules not initialized, execute:\n  git submodule update --init")
@@ -25,7 +25,7 @@ cable_set_build_type(DEFAULT Release CONFIGURATION_TYPES Release Debug)
 include(Hunter/init)
 
 project(evmone LANGUAGES CXX C)
-set(PROJECT_VERSION 0.8.0-dev)
+set(PROJECT_VERSION 0.10.0-dev)
 
 string(REGEX MATCH "([0-9]+)\\.([0-9]+)" _ ${PROJECT_VERSION})
 set(PROJECT_VERSION_MAJOR ${CMAKE_MATCH_1})
@@ -48,10 +48,10 @@ if(CABLE_COMPILER_GNULIKE)
     add_compile_options(
         -Wmissing-declarations
         -Wno-attributes  # Allow using unknown attributes.
+        $<$<COMPILE_LANGUAGE:CXX>:-Wextra-semi>
     )
     cable_add_cxx_compiler_flag_if_supported(-Wduplicated-cond)
     cable_add_cxx_compiler_flag_if_supported(-Wduplicate-enum)
-    cable_add_cxx_compiler_flag_if_supported(-Wextra-semi)
     cable_add_cxx_compiler_flag_if_supported(-Wfinal-dtor-non-final-class)
     cable_add_cxx_compiler_flag_if_supported(-Wlogical-op)
     cable_add_cxx_compiler_flag_if_supported(-Wnewline-eof)
@@ -88,7 +88,8 @@ if(EVMONE_FUZZING)
         # Add fuzzing instrumentation only for non-coverage builds.
         # The coverage builds should be without fuzzing instrumentation to allow
         # running fuzzing corpus once and getting code coverage.
-        set(fuzzing_flags -fsanitize=fuzzer-no-link,undefined,address)
+        set(fuzzing_flags -fsanitize=fuzzer-no-link,address,undefined,shift-exponent,implicit-conversion,nullability)
+#        set(fuzzing_flags -fsanitize=fuzzer-no-link)
         add_compile_options(${fuzzing_flags})
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${fuzzing_flags}")
     endif()

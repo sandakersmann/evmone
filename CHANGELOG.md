@@ -5,12 +5,146 @@ Documentation of all notable changes to the **evmone** project.
 The format is based on [Keep a Changelog],
 and this project adheres to [Semantic Versioning].
 
+## [0.10.0] — unreleased
+
+### Changed
+
+- C++20 is now required to build evmone.
+  [#502](https://github.com/ethereum/evmone/pull/502)
+
+## [0.9.1] — 2022-09-07
+
+### Fixed
+
+- Resetting gas refund counter when execution state is reused. 
+  [#504](https://github.com/ethereum/evmone/pull/504)
+
+
+## [0.9.0] — 2022-08-30
+
+In this release we have been focused on improving performance of the Baseline interpreter.
+The end result is that the Baseline is **26% faster** than in previous version 0.8.0
+and **18% faster** than the current Advanced interpreter while having
+over **8x smaller** code analysis cost. The Baseline is now the _default_ interpreter because 
+it is simpler and has become better than the Advanced.
+
+The Advanced also has got **4% faster** than in the previous version.
+
+All numbers are from running the "main" benchmark suite
+on 4.0 GHz Intel Haswell CPU, using the Clang 15 compiler.
+
+Moreover, evmone now calculates _gas refund_ and reports it back using [EVMC 10][EVMC 10.0.0] API.
+
+Finally, the options `O=2` and `O=0` have been replaced by `advanced`. See below for details.
+
+### Added
+
+- Calculation of EVM gas refunds.
+  [#493](https://github.com/ethereum/evmone/pull/493)
+- `PUSH0` instruction implementation ([EIP-3855]), enabled in [Shanghai].
+  [#448](https://github.com/ethereum/evmone/pull/448)
+  [#432](https://github.com/ethereum/evmone/pull/432)
+- Experimental [EOF] validation and execution ([EIP-3540]), enabled in [Shanghai].
+  [#334](https://github.com/ethereum/evmone/pull/334)
+  [#366](https://github.com/ethereum/evmone/pull/366)
+  [#471](https://github.com/ethereum/evmone/pull/471)
+- _In progress_ State Transition execution tool for testing purposes. So far we've merged:
+  - RLP encoding,
+    [#463](https://github.com/ethereum/evmone/pull/463)
+  - Merkle Patricia Trie root hash computing,
+    [#477](https://github.com/ethereum/evmone/pull/477)
+    [#478](https://github.com/ethereum/evmone/pull/478)
+  - JSON State Transition Test loader.
+    [#479](https://github.com/ethereum/evmone/pull/479)
+
+### Changed
+
+- EVMC options `O=0` (use Baseline) and `O=2` (use Advanced) have been replaced with single
+  option `advanced` to use the non-default Advanced interpreter.
+  [#500](https://github.com/ethereum/evmone/pull/500)
+- Baseline has replaced Advanced as the default interpreter. The later can still be selected
+  with the `advanced` option. Reasons are explained in the introduction.
+  [#500](https://github.com/ethereum/evmone/pull/500)
+- _A lot_ of changes related to the optimization of the Baseline interpreter, including
+  refactoring and optimization of instructions' implementations.
+- The Baseline interpreter now uses "computed goto" dispatch if supported by C++ compiler.
+  The "switch" dispatch can be forced with the `cgoto=no` option.
+  [#495](https://github.com/ethereum/evmone/pull/495)
+- Improvements to basic block metadata placement in the Advanced interpreter.
+  [#457](https://github.com/ethereum/evmone/pull/457)
+  [#474](https://github.com/ethereum/evmone/pull/474)
+- [EVMC] has been upgraded to version [10.0.0][EVMC 10.0.0].
+  [#499](https://github.com/ethereum/evmone/pull/499)
+- [intx] has been upgrade to version [0.8.0][intx 0.8.0].
+  [#446](https://github.com/ethereum/evmone/pull/446)
+
+### Removed
+
+- `evmone-fuzzer` has removed [aleth-interpreter][Aleth] as it is not maintained
+  and lacks the latest EVM features.
+  [#453](https://github.com/ethereum/evmone/pull/453)
+
+
+## [0.8.2] — 2021-08-26
+
+### Fixed
+
+- Fixed building of `evmone-standalone` static library when the `llvm-ar` tool is being used.
+  [#373](https://github.com/ethereum/evmone/pull/373)
+  [#374](https://github.com/ethereum/evmone/pull/374)
+
+
+## [0.8.1] — 2021-08-03
+
+### Fixed
+
+- baseline: Fix incorrect exit after invalid jump.
+  [#370](https://github.com/ethereum/evmone/pull/370)
+
+
+## [0.8.0] — 2021-07-01
+
+### Added
+
+- Full support for **[London]** EVM revision:
+  - [EVMC] upgraded to version [9.0.0][EVMC 9.0.0].
+    [#348](https://github.com/ethereum/evmone/pull/348)
+  - Implementation of the [EIP-3198] "BASEFEE opcode".
+    [#333](https://github.com/ethereum/evmone/pull/333)
+- Instruction tracing ([EIP-3155]) can be enabled via `trace` option in Baseline.
+  [#325](https://github.com/ethereum/evmone/pull/325)
+- Summary of number of executed opcodes is reported if `histogram` option is enabled in Baseline.
+  [#323](https://github.com/ethereum/evmone/pull/323)
+- The `evmone-bench` now reports time of execution without code analysis under "execute" label.
+  The EVMC-like analysis + execution invocation is reported as "total".
+  [#343](https://github.com/ethereum/evmone/pull/343)
+- The `evmone-bench` has started utilizing `evmc::MockedHost` which allows using
+  state-access (e.g. `SLOAD`/`SSTORE`) instructions in benchmarks.
+  [#319](https://github.com/ethereum/evmone/pull/319)
+
+### Changed
+
+- Improvements to semi-public `evmone::baseline` API.
+  [#314](https://github.com/ethereum/evmone/pull/314)
+- The [intx] has been upgraded to version [0.6.0][intx 0.6.0]
+  which increases performance of `ADDMOD` instruction.
+  [#345](https://github.com/ethereum/evmone/pull/345)
+- The [ethash] has been upgraded to version [0.7.0][ethash 0.7.0]
+  which provides faster `KECCAK256` implementation.
+  [#332](https://github.com/ethereum/evmone/pull/332)
+- Optimizations in Baseline interpreter.
+  [#315](https://github.com/ethereum/evmone/pull/315)
+  [#341](https://github.com/ethereum/evmone/pull/341)
+  [#344](https://github.com/ethereum/evmone/pull/344)
+- The Ethereum Consensus Tests upgraded to version [9.0.2][tests 9.0.2].
+  [#349](https://github.com/ethereum/evmone/pull/349)
+
 
 ## [0.7.0] — 2021-04-27
 
 ### Added
 
-- Full support for **Berlin** EVMC revision and [EIP-2929].
+- Full support for **[Berlin]** EVM revision and [EIP-2929].
   [#289](https://github.com/ethereum/evmone/pull/289)
   [#301](https://github.com/ethereum/evmone/pull/301)
 
@@ -103,7 +237,7 @@ and this project adheres to [Semantic Versioning].
 
 ## [0.3.0] — 2019-11-14
 
-This release of evmone adds changes for **Istanbul** EVM revision.
+This release of evmone adds changes for **[Istanbul]** EVM revision.
 
 ### Added
 
@@ -222,11 +356,17 @@ It delivers fully-compatible and high-speed EVM implementation.
 
 ### Added
 
-- Support for all current EVM revisions up to Petersburg.
+- Support for all current EVM revisions up to [Petersburg].
 - Exposes [EVMC] 6 ABI.
 - The [intx 0.2.0](https://github.com/chfast/intx/releases/tag/v0.2.0) library is used for 256-bit precision arithmetic. 
 
 
+[0.10.0]: https://github.com/ethereum/evmone/compare/v0.9.1..master
+[0.9.1]: https://github.com/ethereum/evmone/releases/tag/v0.9.1
+[0.9.0]: https://github.com/ethereum/evmone/releases/tag/v0.9.0
+[0.8.2]: https://github.com/ethereum/evmone/releases/tag/v0.8.2
+[0.8.1]: https://github.com/ethereum/evmone/releases/tag/v0.8.1
+[0.8.0]: https://github.com/ethereum/evmone/releases/tag/v0.8.0
 [0.7.0]: https://github.com/ethereum/evmone/releases/tag/v0.7.0
 [0.6.0]: https://github.com/ethereum/evmone/releases/tag/v0.6.0
 [0.5.0]: https://github.com/ethereum/evmone/releases/tag/v0.5.0
@@ -243,16 +383,33 @@ It delivers fully-compatible and high-speed EVM implementation.
 [EIP-1344]: https://eips.ethereum.org/EIPS/eip-1344
 [EIP-2200]: https://eips.ethereum.org/EIPS/eip-2200
 [EIP-2929]: https://eips.ethereum.org/EIPS/eip-2929
+[EIP-3155]: https://eips.ethereum.org/EIPS/eip-3155
+[EIP-3198]: https://eips.ethereum.org/EIPS/eip-3198
+[EIP-3540]: https://eips.ethereum.org/EIPS/eip-3540
+[EIP-3855]: https://eips.ethereum.org/EIPS/eip-3855
 [Spurious Dragon]: https://eips.ethereum.org/EIPS/eip-607
+[Petersburg]: https://eips.ethereum.org/EIPS/eip-1716
+[Istanbul]: https://eips.ethereum.org/EIPS/eip-1679
+[Berlin]: https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/berlin.md
+[London]: https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/london.md
+[Shanghai]: https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/shanghai.md
+[EOF]: https://notes.ethereum.org/@ipsilon/evm-object-format-overview
 [EVMC]: https://github.com/ethereum/evmc
+[EVMC 10.0.0]: https://github.com/ethereum/evmc/releases/tag/v10.0.0
+[EVMC 9.0.0]: https://github.com/ethereum/evmc/releases/tag/v9.0.0
 [EVMC 8.0.0]: https://github.com/ethereum/evmc/releases/tag/v8.0.0
 [EVMC 7.5.0]: https://github.com/ethereum/evmc/releases/tag/v7.5.0
 [EVMC 7.4.0]: https://github.com/ethereum/evmc/releases/tag/v7.4.0
 [EVMC 7.1.0]: https://github.com/ethereum/evmc/releases/tag/v7.1.0
 [EVMC 7.0.0]: https://github.com/ethereum/evmc/releases/tag/v7.0.0
 [intx]: https://github.com/chfast/intx
+[intx 0.8.0]: https://github.com/chfast/intx/releases/tag/v0.8.0
+[intx 0.6.0]: https://github.com/chfast/intx/releases/tag/v0.6.0
 [intx 0.5.0]: https://github.com/chfast/intx/releases/tag/v0.5.0
+[ethash]: https://github.com/chfast/ethash
+[ethash 0.7.0]: https://github.com/chfast/ethash/releases/tag/v0.7.0
 [Silkworm]: https://github.com/torquem-ch/silkworm
 [tests 8.0.4]: https://github.com/ethereum/tests/releases/tag/8.0.4
+[tests 9.0.2]: https://github.com/ethereum/tests/releases/tag/9.0.2
 [Keep a Changelog]: https://keepachangelog.com/en/1.0.0/
 [Semantic Versioning]: https://semver.org

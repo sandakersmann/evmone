@@ -1,5 +1,5 @@
 # evmone: Fast Ethereum Virtual Machine implementation
-# Copyright 2019-2020 The evmone Authors.
+# Copyright 2019 The evmone Authors.
 # SPDX-License-Identifier: Apache-2.0
 
 include(LibraryTools)
@@ -9,30 +9,44 @@ find_package(intx CONFIG REQUIRED)
 
 add_library(evmone
     ${include_dir}/evmone/evmone.h
-    analysis.cpp
-    analysis.hpp
+    advanced_analysis.cpp
+    advanced_analysis.hpp
+    advanced_execution.cpp
+    advanced_execution.hpp
+    advanced_instructions.cpp
     baseline.cpp
     baseline.hpp
-    execution.cpp
-    execution.hpp
-    instruction_traits.hpp
-    instructions.cpp
+    baseline_instruction_table.cpp
+    baseline_instruction_table.hpp
+    eof.cpp
+    eof.hpp    
     instructions.hpp
     instructions_calls.cpp
-    limits.hpp
+    instructions_opcodes.hpp
+    instructions_storage.cpp
+    instructions_traits.hpp
+    instructions_xmacro.hpp
     opcodes_helpers.h
     tracing.cpp
     tracing.hpp
     vm.cpp
     vm.hpp
 )
-target_compile_features(evmone PUBLIC cxx_std_17)
+target_compile_features(evmone PUBLIC cxx_std_20)
 target_link_libraries(evmone PUBLIC evmc::evmc intx::intx PRIVATE evmc::instructions ethash::keccak)
 target_include_directories(evmone PUBLIC
     $<BUILD_INTERFACE:${include_dir}>$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 if(CABLE_COMPILER_GNULIKE)
-    target_compile_options(evmone PRIVATE -fno-exceptions -fno-rtti)
+    target_compile_options(
+        evmone PRIVATE
+        -fno-exceptions
+        $<$<CXX_COMPILER_ID:GNU>:-Wstack-usage=2500>
+    )
+    if(NOT SANITIZE MATCHES undefined)
+        # RTTI can be disabled except for UBSan which checks vptr integrity.
+        target_compile_options(evmone PRIVATE -fno-rtti)
+    endif()
 endif()
 set_target_properties(
     evmone

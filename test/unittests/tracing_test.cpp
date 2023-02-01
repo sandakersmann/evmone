@@ -6,6 +6,7 @@
 #include <evmc/evmc.hpp>
 #include <evmc/mocked_host.hpp>
 #include <evmone/evmone.h>
+#include <evmone/instructions_traits.hpp>
 #include <evmone/tracing.hpp>
 #include <evmone/vm.hpp>
 #include <gmock/gmock.h>
@@ -23,17 +24,19 @@ protected:
     std::ostringstream trace_stream;
 
     tracing()
-      : m_baseline_vm{evmc_create_evmone(), {{"O", "0"}}},
+      : m_baseline_vm{evmc_create_evmone()},
         vm{*static_cast<evmone::VM*>(m_baseline_vm.get_raw_pointer())}
     {}
 
-    std::string trace(bytes_view code, int32_t depth = 0)
+    std::string trace(
+        bytes_view code, int32_t depth = 0, uint32_t flags = 0, evmc_revision rev = EVMC_BERLIN)
     {
         evmc::MockedHost host;
         evmc_message msg{};
         msg.depth = depth;
+        msg.flags = flags;
         msg.gas = 1000000;
-        m_baseline_vm.execute(host, EVMC_BERLIN, msg, code.data(), code.size());
+        m_baseline_vm.execute(host, rev, msg, code.data(), code.size());
         auto result = trace_stream.str();
         trace_stream.str({});
         return result;
@@ -43,27 +46,49 @@ protected:
     {
         std::string m_name;
         std::ostringstream& m_trace;
-        const uint8_t* m_code = nullptr;
+        bytes_view m_code;
 
         void on_execution_start(
             evmc_revision /*rev*/, const evmc_message& /*msg*/, bytes_view code) noexcept override
         {
-            m_code = code.data();
+            m_code = code;
         }
 
-        void on_execution_end(const evmc_result& /*result*/) noexcept override { m_code = nullptr; }
+        void on_execution_end(const evmc_result& /*result*/) noexcept override { m_code = {}; }
 
-        void on_instruction_start(uint32_t pc) noexcept override
+        void on_instruction_start(uint32_t pc, const intx::uint256* /*stack_top*/,
+            int /*stack_height*/, const evmone::ExecutionState& /*state*/) noexcept override
         {
             const auto opcode = m_code[pc];
-            m_trace << m_name << pc << ":"
-                    << evmc_get_instruction_names_table(EVMC_MAX_REVISION)[opcode] << " ";
+            m_trace << m_name << pc << ":" << evmone::instr::traits[opcode].name << " ";
         }
 
     public:
         explicit OpcodeTracer(tracing& parent, std::string name) noexcept
           : m_name{std::move(name)}, m_trace{parent.trace_stream}
         {}
+    };
+
+    class Inspector final : public evmone::Tracer
+    {
+        bytes m_last_code;
+
+        void on_execution_start(
+            evmc_revision /*rev*/, const evmc_message& /*msg*/, bytes_view code) noexcept override
+        {
+            m_last_code = code;
+        }
+
+        void on_execution_end(const evmc_result& /*result*/) noexcept override {}
+
+        void on_instruction_start(uint32_t /*pc*/, const intx::uint256* /*stack_top*/,
+            int /*stack_height*/, const evmone::ExecutionState& /*state*/) noexcept override
+        {}
+
+    public:
+        explicit Inspector() noexcept = default;
+
+        [[nodiscard]] const bytes& get_last_code() const noexcept { return m_last_code; }
     };
 };
 
@@ -133,5 +158,151 @@ POP,2
 PUSH1,1
 DUP1,1
 SWAP1,1
+)");
+}
+
+TEST_F(tracing, trace)
+{
+    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+
+    trace_stream << '\n';
+    EXPECT_EQ(trace(add(2, 3)), R"(
+{"depth":0,"rev":"Berlin","static":false}
+{"pc":0,"op":96,"opName":"PUSH1","gas":1000000,"stack":[],"memorySize":0}
+{"pc":2,"op":96,"opName":"PUSH1","gas":999997,"stack":["0x3"],"memorySize":0}
+{"pc":4,"op":1,"opName":"ADD","gas":999994,"stack":["0x3","0x2"],"memorySize":0}
+{"error":null,"gas":999991,"gasUsed":9,"output":""}
+)");
+}
+
+TEST_F(tracing, trace_stack)
+{
+    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+
+    const auto code = push(1) + push(2) + push(3) + push(4) + OP_ADD + OP_ADD + OP_ADD;
+    trace_stream << '\n';
+    EXPECT_EQ(trace(code), R"(
+{"depth":0,"rev":"Berlin","static":false}
+{"pc":0,"op":96,"opName":"PUSH1","gas":1000000,"stack":[],"memorySize":0}
+{"pc":2,"op":96,"opName":"PUSH1","gas":999997,"stack":["0x1"],"memorySize":0}
+{"pc":4,"op":96,"opName":"PUSH1","gas":999994,"stack":["0x1","0x2"],"memorySize":0}
+{"pc":6,"op":96,"opName":"PUSH1","gas":999991,"stack":["0x1","0x2","0x3"],"memorySize":0}
+{"pc":8,"op":1,"opName":"ADD","gas":999988,"stack":["0x1","0x2","0x3","0x4"],"memorySize":0}
+{"pc":9,"op":1,"opName":"ADD","gas":999985,"stack":["0x1","0x2","0x7"],"memorySize":0}
+{"pc":10,"op":1,"opName":"ADD","gas":999982,"stack":["0x1","0x9"],"memorySize":0}
+{"error":null,"gas":999979,"gasUsed":21,"output":""}
+)");
+}
+
+TEST_F(tracing, trace_error)
+{
+    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+
+    const auto code = bytecode{OP_POP};
+    trace_stream << '\n';
+    EXPECT_EQ(trace(code), R"(
+{"depth":0,"rev":"Berlin","static":false}
+{"pc":0,"op":80,"opName":"POP","gas":1000000,"stack":[],"memorySize":0}
+{"error":"stack underflow","gas":0,"gasUsed":1000000,"output":""}
+)");
+}
+
+TEST_F(tracing, trace_output)
+{
+    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+
+    const auto code = push(0xabcdef) + ret_top();
+    trace_stream << '\n';
+    EXPECT_EQ(trace(code), R"(
+{"depth":0,"rev":"Berlin","static":false}
+{"pc":0,"op":98,"opName":"PUSH3","gas":1000000,"stack":[],"memorySize":0}
+{"pc":4,"op":96,"opName":"PUSH1","gas":999997,"stack":["0xabcdef"],"memorySize":0}
+{"pc":6,"op":82,"opName":"MSTORE","gas":999994,"stack":["0xabcdef","0x0"],"memorySize":0}
+{"pc":7,"op":96,"opName":"PUSH1","gas":999988,"stack":[],"memorySize":32}
+{"pc":9,"op":96,"opName":"PUSH1","gas":999985,"stack":["0x20"],"memorySize":32}
+{"pc":11,"op":243,"opName":"RETURN","gas":999982,"stack":["0x20","0x0"],"memorySize":32}
+{"error":null,"gas":999982,"gasUsed":18,"output":"0000000000000000000000000000000000000000000000000000000000abcdef"}
+)");
+}
+
+TEST_F(tracing, trace_revert)
+{
+    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+
+    const auto code = mstore(0, 0x0e4404) + push(3) + push(29) + OP_REVERT;
+    trace_stream << '\n';
+    EXPECT_EQ(trace(code), R"(
+{"depth":0,"rev":"Berlin","static":false}
+{"pc":0,"op":98,"opName":"PUSH3","gas":1000000,"stack":[],"memorySize":0}
+{"pc":4,"op":96,"opName":"PUSH1","gas":999997,"stack":["0xe4404"],"memorySize":0}
+{"pc":6,"op":82,"opName":"MSTORE","gas":999994,"stack":["0xe4404","0x0"],"memorySize":0}
+{"pc":7,"op":96,"opName":"PUSH1","gas":999988,"stack":[],"memorySize":32}
+{"pc":9,"op":96,"opName":"PUSH1","gas":999985,"stack":["0x3"],"memorySize":32}
+{"pc":11,"op":253,"opName":"REVERT","gas":999982,"stack":["0x3","0x1d"],"memorySize":32}
+{"error":"revert","gas":999982,"gasUsed":18,"output":"0e4404"}
+)");
+}
+
+TEST_F(tracing, trace_create)
+{
+    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+
+    trace_stream << '\n';
+    EXPECT_EQ(trace({}, 2), R"(
+{"depth":2,"rev":"Berlin","static":false}
+{"error":null,"gas":1000000,"gasUsed":0,"output":""}
+)");
+}
+
+TEST_F(tracing, trace_static)
+{
+    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+
+    trace_stream << '\n';
+    EXPECT_EQ(trace({}, 2, EVMC_STATIC), R"(
+{"depth":2,"rev":"Berlin","static":true}
+{"error":null,"gas":1000000,"gasUsed":0,"output":""}
+)");
+}
+
+TEST_F(tracing, trace_undefined_instruction)
+{
+    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+
+    const auto code = bytecode{} + OP_JUMPDEST + "EF";
+    trace_stream << '\n';
+    EXPECT_EQ(trace(code), R"(
+{"depth":0,"rev":"Berlin","static":false}
+{"pc":0,"op":91,"opName":"JUMPDEST","gas":1000000,"stack":[],"memorySize":0}
+{"pc":1,"op":239,"opName":"0xef","gas":999999,"stack":[],"memorySize":0}
+{"error":"undefined instruction","gas":0,"gasUsed":1000000,"output":""}
+)");
+}
+
+TEST_F(tracing, trace_code_containing_zero)
+{
+    auto tracer_ptr = std::make_unique<Inspector>();
+    const auto& tracer = *tracer_ptr;
+    vm.add_tracer(std::move(tracer_ptr));
+
+    const auto code = bytecode{} + "602a6000556101c960015560068060166000396000f3600035600055";
+
+    trace(code);
+
+    EXPECT_EQ(tracer.get_last_code().size(), code.size());
+}
+
+TEST_F(tracing, trace_eof)
+{
+    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+
+    trace_stream << '\n';
+    EXPECT_EQ(trace(eof1_bytecode(add(2, 3) + OP_STOP), 0, 0, EVMC_SHANGHAI), R"(
+{"depth":0,"rev":"Shanghai","static":false}
+{"pc":0,"op":96,"opName":"PUSH1","gas":1000000,"stack":[],"memorySize":0}
+{"pc":2,"op":96,"opName":"PUSH1","gas":999997,"stack":["0x3"],"memorySize":0}
+{"pc":4,"op":1,"opName":"ADD","gas":999994,"stack":["0x3","0x2"],"memorySize":0}
+{"pc":5,"op":0,"opName":"STOP","gas":999991,"stack":["0x5"],"memorySize":0}
+{"error":null,"gas":999991,"gasUsed":9,"output":""}
 )");
 }

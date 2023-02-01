@@ -3,33 +3,60 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-#include "execution_state.hpp"
 #include <evmc/evmc.h>
 #include <evmc/utils.h>
+#include <memory>
+#include <string_view>
 #include <vector>
 
 namespace evmone
 {
+using bytes_view = std::basic_string_view<uint8_t>;
+
+class ExecutionState;
 class VM;
 
 namespace baseline
 {
-struct CodeAnalysis
+class CodeAnalysis
 {
+public:
     using JumpdestMap = std::vector<bool>;
 
-    JumpdestMap jumpdest_map;
+    bytes_view executable_code;  ///< Executable code section.
+    JumpdestMap jumpdest_map;    ///< Map of valid jump destinations.
+
+private:
+    /// Padded code for faster legacy code execution.
+    /// If not nullptr the executable_code must point to it.
+    std::unique_ptr<uint8_t[]> m_padded_code;
+
+public:
+    CodeAnalysis(std::unique_ptr<uint8_t[]> padded_code, size_t code_size, JumpdestMap map)
+      : executable_code{padded_code.get(), code_size},
+        jumpdest_map{std::move(map)},
+        m_padded_code{std::move(padded_code)}
+    {}
+
+    CodeAnalysis(bytes_view code, JumpdestMap map)
+      : executable_code{code}, jumpdest_map{std::move(map)}
+    {}
 };
+static_assert(std::is_move_constructible_v<CodeAnalysis>);
+static_assert(std::is_move_assignable_v<CodeAnalysis>);
+static_assert(!std::is_copy_constructible_v<CodeAnalysis>);
+static_assert(!std::is_copy_assignable_v<CodeAnalysis>);
 
 /// Analyze the code to build the bitmap of valid JUMPDEST locations.
-EVMC_EXPORT CodeAnalysis analyze(const uint8_t* code, size_t code_size);
+EVMC_EXPORT CodeAnalysis analyze(evmc_revision rev, bytes_view code);
 
 /// Executes in Baseline interpreter using EVMC-compatible parameters.
 evmc_result execute(evmc_vm* vm, const evmc_host_interface* host, evmc_host_context* ctx,
     evmc_revision rev, const evmc_message* msg, const uint8_t* code, size_t code_size) noexcept;
 
 /// Executes in Baseline interpreter on the given external and initialized state.
-evmc_result execute(const VM&, ExecutionState& state, const CodeAnalysis& analysis) noexcept;
+EVMC_EXPORT evmc_result execute(
+    const VM&, ExecutionState& state, const CodeAnalysis& analysis) noexcept;
 
 }  // namespace baseline
 }  // namespace evmone
