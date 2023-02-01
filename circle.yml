@@ -556,8 +556,8 @@ jobs:
       - test
 
   wasi:
-    docker:
-      - image: ethereum/cpp-build-env:16-gcc-10
+    executor: linux-clang-latest
+    resource_class: small
     environment:
       TOOLCHAIN: wasm32-wasi
     steps:
