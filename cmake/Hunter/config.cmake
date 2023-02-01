@@ -4,9 +4,9 @@
 
 include(hunter_cmake_args)
 
-hunter_cmake_args(
+hunter_config(
     ethash
-    CMAKE_ARGS -DETHASH_BUILD_ETHASH=OFF -DETHASH_BUILD_TESTS=OFF
+    CMAKE_ARGS ETHASH_BUILD_ETHASH=OFF ETHASH_BUILD_TESTS=OFF
 )
 
 hunter_config(
