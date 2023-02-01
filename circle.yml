@@ -618,9 +618,9 @@ workflows:
               only: /^v[0-9].*/
 #      - state-tests
 #      - blockchain-tests
-3      - cmake-min
-3      - gcc-min
-3      - clang-min
+#      - cmake-min
+#      - gcc-min
+#      - clang-min
 #      - gcc-latest-coverage
 #      - gcc-latest-memcheck
 #      - clang-latest-sanitizers
